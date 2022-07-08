@@ -1,171 +1,92 @@
 """
-Processors are little transformation blocks that transform the fragments list
-from a buffer before the BufferControl will render it to the screen.
+Processors are little transformation blocks that transform the token list from
+a buffer before the BufferControl will render it to the screen.
 
-They can insert fragments before or after, or highlight fragments by replacing the
-fragment types.
+They can insert tokens before or after, or highlight fragments by replacing the
+token types.
 """
-import re
+from __future__ import unicode_literals
 from abc import ABCMeta, abstractmethod
-from typing import (
-    TYPE_CHECKING,
-    Callable,
-    Hashable,
-    List,
-    Optional,
-    Tuple,
-    Type,
-    Union,
-    cast,
-)
+from six import with_metaclass
+from six.moves import range
 
-from prompt_toolkit.application.current import get_app
 from prompt_toolkit.cache import SimpleCache
 from prompt_toolkit.document import Document
-from prompt_toolkit.filters import FilterOrBool, to_filter, vi_insert_multiple_mode
-from prompt_toolkit.formatted_text import (
-    AnyFormattedText,
-    StyleAndTextTuples,
-    to_formatted_text,
+from prompt_toolkit.enums import SEARCH_BUFFER
+from prompt_toolkit.filters import to_cli_filter, ViInsertMultipleMode
+from prompt_toolkit.layout.utils import token_list_to_text
+from prompt_toolkit.reactive import Integer
+from prompt_toolkit.token import Token
+
+from .utils import token_list_len, explode_tokens
+
+import re
+
+__all__ = (
+    'Processor',
+    'Transformation',
+
+    'HighlightSearchProcessor',
+    'HighlightSelectionProcessor',
+    'PasswordProcessor',
+    'HighlightMatchingBracketProcessor',
+    'DisplayMultipleCursors',
+    'BeforeInput',
+    'AfterInput',
+    'AppendAutoSuggestion',
+    'ConditionalProcessor',
+    'ShowLeadingWhiteSpaceProcessor',
+    'ShowTrailingWhiteSpaceProcessor',
+    'TabsProcessor',
 )
-from prompt_toolkit.formatted_text.utils import fragment_list_len, fragment_list_to_text
-from prompt_toolkit.search import SearchDirection
-from prompt_toolkit.utils import to_int, to_str
-
-from .utils import explode_text_fragments
-
-if TYPE_CHECKING:
-    from .controls import BufferControl, UIContent
-
-__all__ = [
-    "Processor",
-    "TransformationInput",
-    "Transformation",
-    "DummyProcessor",
-    "HighlightSearchProcessor",
-    "HighlightIncrementalSearchProcessor",
-    "HighlightSelectionProcessor",
-    "PasswordProcessor",
-    "HighlightMatchingBracketProcessor",
-    "DisplayMultipleCursors",
-    "BeforeInput",
-    "ShowArg",
-    "AfterInput",
-    "AppendAutoSuggestion",
-    "ConditionalProcessor",
-    "ShowLeadingWhiteSpaceProcessor",
-    "ShowTrailingWhiteSpaceProcessor",
-    "TabsProcessor",
-    "ReverseSearchProcessor",
-    "DynamicProcessor",
-    "merge_processors",
-]
 
 
-class Processor(metaclass=ABCMeta):
+class Processor(with_metaclass(ABCMeta, object)):
     """
-    Manipulate the fragments for a given line in a
+    Manipulate the tokens for a given line in a
     :class:`~prompt_toolkit.layout.controls.BufferControl`.
     """
-
     @abstractmethod
-    def apply_transformation(
-        self, transformation_input: "TransformationInput"
-    ) -> "Transformation":
+    def apply_transformation(self, cli, document, lineno, source_to_display, tokens):
         """
-        Apply transformation. Returns a :class:`.Transformation` instance.
+        Apply transformation.  Returns a :class:`.Transformation` instance.
 
-        :param transformation_input: :class:`.TransformationInput` object.
+        :param cli: :class:`.CommandLineInterface` instance.
+        :param lineno: The number of the line to which we apply the processor.
+        :param source_to_display: A function that returns the position in the
+            `tokens` for any position in the source string. (This takes
+            previous processors into account.)
+        :param tokens: List of tokens that we can transform. (Received from the
+            previous processor.)
         """
-        return Transformation(transformation_input.fragments)
+        return Transformation(tokens)
+
+    def has_focus(self, cli):
+        """
+        Processors can override the focus.
+        (Used for the reverse-i-search prefix in DefaultPrompt.)
+        """
+        return False
 
 
-SourceToDisplay = Callable[[int], int]
-DisplayToSource = Callable[[int], int]
-
-
-class TransformationInput:
-    """
-    :param buffer_control: :class:`.BufferControl` instance.
-    :param lineno: The number of the line to which we apply the processor.
-    :param source_to_display: A function that returns the position in the
-        `fragments` for any position in the source string. (This takes
-        previous processors into account.)
-    :param fragments: List of fragments that we can transform. (Received from the
-        previous processor.)
-    """
-
-    def __init__(
-        self,
-        buffer_control: "BufferControl",
-        document: Document,
-        lineno: int,
-        source_to_display: SourceToDisplay,
-        fragments: StyleAndTextTuples,
-        width: int,
-        height: int,
-    ) -> None:
-
-        self.buffer_control = buffer_control
-        self.document = document
-        self.lineno = lineno
-        self.source_to_display = source_to_display
-        self.fragments = fragments
-        self.width = width
-        self.height = height
-
-    def unpack(
-        self,
-    ) -> Tuple[
-        "BufferControl", Document, int, SourceToDisplay, StyleAndTextTuples, int, int
-    ]:
-        return (
-            self.buffer_control,
-            self.document,
-            self.lineno,
-            self.source_to_display,
-            self.fragments,
-            self.width,
-            self.height,
-        )
-
-
-class Transformation:
+class Transformation(object):
     """
     Transformation result, as returned by :meth:`.Processor.apply_transformation`.
 
     Important: Always make sure that the length of `document.text` is equal to
-               the length of all the text in `fragments`!
+               the length of all the text in `tokens`!
 
-    :param fragments: The transformed fragments. To be displayed, or to pass to
-        the next processor.
-    :param source_to_display: Cursor position transformation from original
-        string to transformed string.
+    :param tokens: The transformed tokens. To be displayed, or to pass to the
+        next processor.
+    :param source_to_display: Cursor position transformation from original string to
+        transformed string.
     :param display_to_source: Cursor position transformed from source string to
         original string.
     """
-
-    def __init__(
-        self,
-        fragments: StyleAndTextTuples,
-        source_to_display: Optional[SourceToDisplay] = None,
-        display_to_source: Optional[DisplayToSource] = None,
-    ) -> None:
-
-        self.fragments = fragments
+    def __init__(self, tokens, source_to_display=None, display_to_source=None):
+        self.tokens = tokens
         self.source_to_display = source_to_display or (lambda i: i)
         self.display_to_source = display_to_source or (lambda i: i)
-
-
-class DummyProcessor(Processor):
-    """
-    A `Processor` that doesn't do anything.
-    """
-
-    def apply_transformation(
-        self, transformation_input: TransformationInput
-    ) -> Transformation:
-        return Transformation(transformation_input.fragments)
 
 
 class HighlightSearchProcessor(Processor):
@@ -173,49 +94,40 @@ class HighlightSearchProcessor(Processor):
     Processor that highlights search matches in the document.
     Note that this doesn't support multiline search matches yet.
 
-    The style classes 'search' and 'search.current' will be applied to the
-    content.
+    :param preview_search: A Filter; when active it indicates that we take
+        the search text in real time while the user is typing, instead of the
+        last active search state.
     """
+    def __init__(self, preview_search=False, search_buffer_name=SEARCH_BUFFER,
+                 get_search_state=None):
+        self.preview_search = to_cli_filter(preview_search)
+        self.search_buffer_name = search_buffer_name
+        self.get_search_state = get_search_state or (lambda cli: cli.search_state)
 
-    _classname = "search"
-    _classname_current = "search.current"
-
-    def _get_search_text(self, buffer_control: "BufferControl") -> str:
+    def _get_search_text(self, cli):
         """
         The text we are searching for.
         """
-        return buffer_control.search_state.text
+        # When the search buffer has focus, take that text.
+        if self.preview_search(cli) and cli.buffers[self.search_buffer_name].text:
+            return cli.buffers[self.search_buffer_name].text
+        # Otherwise, take the text of the last active search.
+        else:
+            return self.get_search_state(cli).text
 
-    def apply_transformation(
-        self, transformation_input: TransformationInput
-    ) -> Transformation:
+    def apply_transformation(self, cli, document, lineno, source_to_display, tokens):
+        search_text = self._get_search_text(cli)
+        searchmatch_current_token = (':', ) + Token.SearchMatch.Current
+        searchmatch_token = (':', ) + Token.SearchMatch
 
-        (
-            buffer_control,
-            document,
-            lineno,
-            source_to_display,
-            fragments,
-            _,
-            _,
-        ) = transformation_input.unpack()
+        if search_text and not cli.is_returning:
+            # For each search match, replace the Token.
+            line_text = token_list_to_text(tokens)
+            tokens = explode_tokens(tokens)
 
-        search_text = self._get_search_text(buffer_control)
-        searchmatch_fragment = f" class:{self._classname} "
-        searchmatch_current_fragment = f" class:{self._classname_current} "
-
-        if search_text and not get_app().is_done:
-            # For each search match, replace the style string.
-            line_text = fragment_list_to_text(fragments)
-            fragments = explode_text_fragments(fragments)
-
-            if buffer_control.search_state.ignore_case():
-                flags = re.IGNORECASE
-            else:
-                flags = re.RegexFlag(0)
+            flags = re.IGNORECASE if cli.is_ignoring_case else 0
 
             # Get cursor column.
-            cursor_column: Optional[int]
             if document.cursor_position_row == lineno:
                 cursor_column = source_to_display(document.cursor_position_col)
             else:
@@ -228,64 +140,21 @@ class HighlightSearchProcessor(Processor):
                     on_cursor = False
 
                 for i in range(match.start(), match.end()):
-                    old_fragment, text, *_ = fragments[i]
+                    old_token, text = tokens[i]
                     if on_cursor:
-                        fragments[i] = (
-                            old_fragment + searchmatch_current_fragment,
-                            fragments[i][1],
-                        )
+                        tokens[i] = (old_token + searchmatch_current_token, tokens[i][1])
                     else:
-                        fragments[i] = (
-                            old_fragment + searchmatch_fragment,
-                            fragments[i][1],
-                        )
+                        tokens[i] = (old_token + searchmatch_token, tokens[i][1])
 
-        return Transformation(fragments)
-
-
-class HighlightIncrementalSearchProcessor(HighlightSearchProcessor):
-    """
-    Highlight the search terms that are used for highlighting the incremental
-    search. The style class 'incsearch' will be applied to the content.
-
-    Important: this requires the `preview_search=True` flag to be set for the
-    `BufferControl`. Otherwise, the cursor position won't be set to the search
-    match while searching, and nothing happens.
-    """
-
-    _classname = "incsearch"
-    _classname_current = "incsearch.current"
-
-    def _get_search_text(self, buffer_control: "BufferControl") -> str:
-        """
-        The text we are searching for.
-        """
-        # When the search buffer has focus, take that text.
-        search_buffer = buffer_control.search_buffer
-        if search_buffer is not None and search_buffer.text:
-            return search_buffer.text
-        return ""
+        return Transformation(tokens)
 
 
 class HighlightSelectionProcessor(Processor):
     """
     Processor that highlights the selection in the document.
     """
-
-    def apply_transformation(
-        self, transformation_input: TransformationInput
-    ) -> Transformation:
-        (
-            buffer_control,
-            document,
-            lineno,
-            source_to_display,
-            fragments,
-            _,
-            _,
-        ) = transformation_input.unpack()
-
-        selected_fragment = " class:selected "
+    def apply_transformation(self, cli, document, lineno, source_to_display, tokens):
+        selected_token = (':', ) + Token.SelectedText
 
         # In case of selection, highlight all matches.
         selection_at_line = document.selection_range_at_line(lineno)
@@ -295,43 +164,33 @@ class HighlightSelectionProcessor(Processor):
             from_ = source_to_display(from_)
             to = source_to_display(to)
 
-            fragments = explode_text_fragments(fragments)
+            tokens = explode_tokens(tokens)
 
-            if from_ == 0 and to == 0 and len(fragments) == 0:
+            if from_ == 0 and to == 0 and len(tokens) == 0:
                 # When this is an empty line, insert a space in order to
-                # visualise the selection.
-                return Transformation([(selected_fragment, " ")])
+                # visualiase the selection.
+                return Transformation([(Token.SelectedText, ' ')])
             else:
-                for i in range(from_, to):
-                    if i < len(fragments):
-                        old_fragment, old_text, *_ = fragments[i]
-                        fragments[i] = (old_fragment + selected_fragment, old_text)
-                    elif i == len(fragments):
-                        fragments.append((selected_fragment, " "))
+                for i in range(from_, to + 1):
+                    if i < len(tokens):
+                        old_token, old_text = tokens[i]
+                        tokens[i] = (old_token + selected_token, old_text)
 
-        return Transformation(fragments)
+        return Transformation(tokens)
 
 
 class PasswordProcessor(Processor):
     """
-    Processor that masks the input. (For passwords.)
+    Processor that turns masks the input. (For passwords.)
 
     :param char: (string) Character to be used. "*" by default.
     """
-
-    def __init__(self, char: str = "*") -> None:
+    def __init__(self, char='*'):
         self.char = char
 
-    def apply_transformation(self, ti: TransformationInput) -> Transformation:
-        fragments: StyleAndTextTuples = cast(
-            StyleAndTextTuples,
-            [
-                (style, self.char * len(text), *handler)
-                for style, text, *handler in ti.fragments
-            ],
-        )
-
-        return Transformation(fragments)
+    def apply_transformation(self, cli, document, lineno, source_to_display, tokens):
+        tokens = [(token, self.char * len(text)) for token, text in tokens]
+        return Transformation(tokens)
 
 
 class HighlightMatchingBracketProcessor(Processor):
@@ -345,44 +204,32 @@ class HighlightMatchingBracketProcessor(Processor):
         to scan the whole document for matching brackets on each key press, so
         we limit to this value.)
     """
+    _closing_braces = '])}>'
 
-    _closing_braces = "])}>"
-
-    def __init__(
-        self, chars: str = "[](){}<>", max_cursor_distance: int = 1000
-    ) -> None:
+    def __init__(self, chars='[](){}<>', max_cursor_distance=1000):
         self.chars = chars
         self.max_cursor_distance = max_cursor_distance
 
-        self._positions_cache: SimpleCache[
-            Hashable, List[Tuple[int, int]]
-        ] = SimpleCache(maxsize=8)
+        self._positions_cache = SimpleCache(maxsize=8)
 
-    def _get_positions_to_highlight(self, document: Document) -> List[Tuple[int, int]]:
+    def _get_positions_to_highlight(self, document):
         """
         Return a list of (row, col) tuples that need to be highlighted.
         """
-        pos: Optional[int]
-
         # Try for the character under the cursor.
         if document.current_char and document.current_char in self.chars:
             pos = document.find_matching_bracket_position(
-                start_pos=document.cursor_position - self.max_cursor_distance,
-                end_pos=document.cursor_position + self.max_cursor_distance,
-            )
+                    start_pos=document.cursor_position - self.max_cursor_distance,
+                    end_pos=document.cursor_position + self.max_cursor_distance)
 
         # Try for the character before the cursor.
-        elif (
-            document.char_before_cursor
-            and document.char_before_cursor in self._closing_braces
-            and document.char_before_cursor in self.chars
-        ):
+        elif (document.char_before_cursor and document.char_before_cursor in
+              self._closing_braces and document.char_before_cursor in self.chars):
             document = Document(document.text, document.cursor_position - 1)
 
             pos = document.find_matching_bracket_position(
-                start_pos=document.cursor_position - self.max_cursor_distance,
-                end_pos=document.cursor_position + self.max_cursor_distance,
-            )
+                    start_pos=document.cursor_position - self.max_cursor_distance,
+                    end_pos=document.cursor_position + self.max_cursor_distance)
         else:
             pos = None
 
@@ -390,298 +237,253 @@ class HighlightMatchingBracketProcessor(Processor):
         if pos:
             pos += document.cursor_position  # pos is relative.
             row, col = document.translate_index_to_position(pos)
-            return [
-                (row, col),
-                (document.cursor_position_row, document.cursor_position_col),
-            ]
+            return [(row, col), (document.cursor_position_row, document.cursor_position_col)]
         else:
             return []
 
-    def apply_transformation(
-        self, transformation_input: TransformationInput
-    ) -> Transformation:
-
-        (
-            buffer_control,
-            document,
-            lineno,
-            source_to_display,
-            fragments,
-            _,
-            _,
-        ) = transformation_input.unpack()
-
-        # When the application is in the 'done' state, don't highlight.
-        if get_app().is_done:
-            return Transformation(fragments)
-
+    def apply_transformation(self, cli, document, lineno, source_to_display, tokens):
         # Get the highlight positions.
-        key = (get_app().render_counter, document.text, document.cursor_position)
+        key = (cli.render_counter, document.text, document.cursor_position)
         positions = self._positions_cache.get(
-            key, lambda: self._get_positions_to_highlight(document)
-        )
+            key, lambda: self._get_positions_to_highlight(document))
 
         # Apply if positions were found at this line.
         if positions:
             for row, col in positions:
                 if row == lineno:
                     col = source_to_display(col)
-                    fragments = explode_text_fragments(fragments)
-                    style, text, *_ = fragments[col]
+                    tokens = explode_tokens(tokens)
+                    token, text = tokens[col]
 
                     if col == document.cursor_position_col:
-                        style += " class:matching-bracket.cursor "
+                        token += (':', ) + Token.MatchingBracket.Cursor
                     else:
-                        style += " class:matching-bracket.other "
+                        token += (':', ) + Token.MatchingBracket.Other
 
-                    fragments[col] = (style, text)
+                    tokens[col] = (token, text)
 
-        return Transformation(fragments)
+        return Transformation(tokens)
 
 
 class DisplayMultipleCursors(Processor):
     """
     When we're in Vi block insert mode, display all the cursors.
     """
+    _insert_multiple =  ViInsertMultipleMode()
 
-    def apply_transformation(
-        self, transformation_input: TransformationInput
-    ) -> Transformation:
+    def __init__(self, buffer_name):
+        self.buffer_name = buffer_name
 
-        (
-            buffer_control,
-            document,
-            lineno,
-            source_to_display,
-            fragments,
-            _,
-            _,
-        ) = transformation_input.unpack()
+    def apply_transformation(self, cli, document, lineno, source_to_display, tokens):
+        buff = cli.buffers[self.buffer_name]
 
-        buff = buffer_control.buffer
-
-        if vi_insert_multiple_mode():
-            cursor_positions = buff.multiple_cursor_positions
-            fragments = explode_text_fragments(fragments)
+        if self._insert_multiple(cli):
+            positions = buff.multiple_cursor_positions
+            tokens = explode_tokens(tokens)
 
             # If any cursor appears on the current line, highlight that.
             start_pos = document.translate_row_col_to_index(lineno, 0)
             end_pos = start_pos + len(document.lines[lineno])
 
-            fragment_suffix = " class:multiple-cursors"
+            token_suffix = (':', ) + Token.MultipleCursors.Cursor
 
-            for p in cursor_positions:
-                if start_pos <= p <= end_pos:
+            for p in positions:
+                if start_pos <= p < end_pos:
                     column = source_to_display(p - start_pos)
 
-                    # Replace fragment.
-                    try:
-                        style, text, *_ = fragments[column]
-                    except IndexError:
-                        # Cursor needs to be displayed after the current text.
-                        fragments.append((fragment_suffix, " "))
-                    else:
-                        style += fragment_suffix
-                        fragments[column] = (style, text)
+                    # Replace token.
+                    token, text = tokens[column]
+                    token += token_suffix
+                    tokens[column] = (token, text)
+                elif p == end_pos:
+                    tokens.append((token_suffix, ' '))
 
-            return Transformation(fragments)
+            return Transformation(tokens)
         else:
-            return Transformation(fragments)
+            return Transformation(tokens)
 
 
 class BeforeInput(Processor):
     """
-    Insert text before the input.
+    Insert tokens before the input.
 
-    :param text: This can be either plain text or formatted text
-        (or a callable that returns any of those).
-    :param style: style to be applied to this prompt/prefix.
+    :param get_tokens: Callable that takes a
+        :class:`~prompt_toolkit.interface.CommandLineInterface` and returns the
+        list of tokens to be inserted.
     """
+    def __init__(self, get_tokens):
+        assert callable(get_tokens)
+        self.get_tokens = get_tokens
 
-    def __init__(self, text: AnyFormattedText, style: str = "") -> None:
-        self.text = text
-        self.style = style
+    def apply_transformation(self, cli, document, lineno, source_to_display, tokens):
+        if lineno == 0:
+            tokens_before = self.get_tokens(cli)
+            tokens = tokens_before + tokens
 
-    def apply_transformation(self, ti: TransformationInput) -> Transformation:
-        source_to_display: Optional[SourceToDisplay]
-        display_to_source: Optional[DisplayToSource]
-
-        if ti.lineno == 0:
-            # Get fragments.
-            fragments_before = to_formatted_text(self.text, self.style)
-            fragments = fragments_before + ti.fragments
-
-            shift_position = fragment_list_len(fragments_before)
+            shift_position = token_list_len(tokens_before)
             source_to_display = lambda i: i + shift_position
             display_to_source = lambda i: i - shift_position
         else:
-            fragments = ti.fragments
             source_to_display = None
             display_to_source = None
 
-        return Transformation(
-            fragments,
-            source_to_display=source_to_display,
-            display_to_source=display_to_source,
-        )
+        return Transformation(tokens, source_to_display=source_to_display,
+                              display_to_source=display_to_source)
 
-    def __repr__(self) -> str:
-        return f"BeforeInput({self.text!r}, {self.style!r})"
+    @classmethod
+    def static(cls, text, token=Token):
+        """
+        Create a :class:`.BeforeInput` instance that always inserts the same
+        text.
+        """
+        def get_static_tokens(cli):
+            return [(token, text)]
+        return cls(get_static_tokens)
 
-
-class ShowArg(BeforeInput):
-    """
-    Display the 'arg' in front of the input.
-
-    This was used by the `PromptSession`, but now it uses the
-    `Window.get_line_prefix` function instead.
-    """
-
-    def __init__(self) -> None:
-        super().__init__(self._get_text_fragments)
-
-    def _get_text_fragments(self) -> StyleAndTextTuples:
-        app = get_app()
-        if app.key_processor.arg is None:
-            return []
-        else:
-            arg = app.key_processor.arg
-
-            return [
-                ("class:prompt.arg", "(arg: "),
-                ("class:prompt.arg.text", str(arg)),
-                ("class:prompt.arg", ") "),
-            ]
-
-    def __repr__(self) -> str:
-        return "ShowArg()"
+    def __repr__(self):
+        return '%s(get_tokens=%r)' % (
+            self.__class__.__name__, self.get_tokens)
 
 
 class AfterInput(Processor):
     """
-    Insert text after the input.
+    Insert tokens after the input.
 
-    :param text: This can be either plain text or formatted text
-        (or a callable that returns any of those).
-    :param style: style to be applied to this prompt/prefix.
+    :param get_tokens: Callable that takes a
+        :class:`~prompt_toolkit.interface.CommandLineInterface` and returns the
+        list of tokens to be appended.
     """
+    def __init__(self, get_tokens):
+        assert callable(get_tokens)
+        self.get_tokens = get_tokens
 
-    def __init__(self, text: AnyFormattedText, style: str = "") -> None:
-        self.text = text
-        self.style = style
-
-    def apply_transformation(self, ti: TransformationInput) -> Transformation:
-        # Insert fragments after the last line.
-        if ti.lineno == ti.document.line_count - 1:
-            # Get fragments.
-            fragments_after = to_formatted_text(self.text, self.style)
-            return Transformation(fragments=ti.fragments + fragments_after)
+    def apply_transformation(self, cli, document, lineno, source_to_display, tokens):
+        # Insert tokens after the last line.
+        if lineno == document.line_count - 1:
+            return Transformation(tokens=tokens + self.get_tokens(cli))
         else:
-            return Transformation(fragments=ti.fragments)
+            return Transformation(tokens=tokens)
 
-    def __repr__(self) -> str:
-        return f"{self.__class__.__name__}({self.text!r}, style={self.style!r})"
+    @classmethod
+    def static(cls, text, token=Token):
+        """
+        Create a :class:`.AfterInput` instance that always inserts the same
+        text.
+        """
+        def get_static_tokens(cli):
+            return [(token, text)]
+        return cls(get_static_tokens)
+
+    def __repr__(self):
+        return '%s(get_tokens=%r)' % (
+            self.__class__.__name__, self.get_tokens)
 
 
 class AppendAutoSuggestion(Processor):
     """
     Append the auto suggestion to the input.
     (The user can then press the right arrow the insert the suggestion.)
+
+    :param buffer_name: The name of the buffer from where we should take the
+        auto suggestion. If not given, we take the current buffer.
     """
+    def __init__(self, buffer_name=None, token=Token.AutoSuggestion):
+        self.buffer_name = buffer_name
+        self.token = token
 
-    def __init__(self, style: str = "class:auto-suggestion") -> None:
-        self.style = style
+    def _get_buffer(self, cli):
+        if self.buffer_name:
+            return cli.buffers[self.buffer_name]
+        else:
+            return cli.current_buffer
 
-    def apply_transformation(self, ti: TransformationInput) -> Transformation:
-        # Insert fragments after the last line.
-        if ti.lineno == ti.document.line_count - 1:
-            buffer = ti.buffer_control.buffer
+    def apply_transformation(self, cli, document, lineno, source_to_display, tokens):
+        # Insert tokens after the last line.
+        if lineno == document.line_count - 1:
+            buffer = self._get_buffer(cli)
 
-            if buffer.suggestion and ti.document.is_cursor_at_the_end:
+            if buffer.suggestion and buffer.document.is_cursor_at_the_end:
                 suggestion = buffer.suggestion.text
             else:
-                suggestion = ""
+                suggestion = ''
 
-            return Transformation(fragments=ti.fragments + [(self.style, suggestion)])
+            return Transformation(tokens=tokens + [(self.token, suggestion)])
         else:
-            return Transformation(fragments=ti.fragments)
+            return Transformation(tokens=tokens)
 
 
 class ShowLeadingWhiteSpaceProcessor(Processor):
     """
     Make leading whitespace visible.
 
-    :param get_char: Callable that returns one character.
+    :param get_char: Callable that takes a :class:`CommandLineInterface`
+        instance and returns one character.
+    :param token: Token to be used.
     """
+    def __init__(self, get_char=None, token=Token.LeadingWhiteSpace):
+        assert get_char is None or callable(get_char)
 
-    def __init__(
-        self,
-        get_char: Optional[Callable[[], str]] = None,
-        style: str = "class:leading-whitespace",
-    ) -> None:
-        def default_get_char() -> str:
-            if "\xb7".encode(get_app().output.encoding(), "replace") == b"?":
-                return "."
-            else:
-                return "\xb7"
+        if get_char is None:
+            def get_char(cli):
+                if '\xb7'.encode(cli.output.encoding(), 'replace') == b'?':
+                    return '.'
+                else:
+                    return '\xb7'
 
-        self.style = style
-        self.get_char = get_char or default_get_char
+        self.token = token
+        self.get_char = get_char
 
-    def apply_transformation(self, ti: TransformationInput) -> Transformation:
-        fragments = ti.fragments
+    def apply_transformation(self, cli, document, lineno, source_to_display, tokens):
+        # Walk through all te tokens.
+        if tokens and token_list_to_text(tokens).startswith(' '):
+            t = (self.token, self.get_char(cli))
+            tokens = explode_tokens(tokens)
 
-        # Walk through all te fragments.
-        if fragments and fragment_list_to_text(fragments).startswith(" "):
-            t = (self.style, self.get_char())
-            fragments = explode_text_fragments(fragments)
-
-            for i in range(len(fragments)):
-                if fragments[i][1] == " ":
-                    fragments[i] = t
+            for i in range(len(tokens)):
+                if tokens[i][1] == ' ':
+                    tokens[i] = t
                 else:
                     break
 
-        return Transformation(fragments)
+        return Transformation(tokens)
 
 
 class ShowTrailingWhiteSpaceProcessor(Processor):
     """
     Make trailing whitespace visible.
 
-    :param get_char: Callable that returns one character.
+    :param get_char: Callable that takes a :class:`CommandLineInterface`
+        instance and returns one character.
+    :param token: Token to be used.
     """
+    def __init__(self, get_char=None, token=Token.TrailingWhiteSpace):
+        assert get_char is None or callable(get_char)
 
-    def __init__(
-        self,
-        get_char: Optional[Callable[[], str]] = None,
-        style: str = "class:training-whitespace",
-    ) -> None:
-        def default_get_char() -> str:
-            if "\xb7".encode(get_app().output.encoding(), "replace") == b"?":
-                return "."
-            else:
-                return "\xb7"
+        if get_char is None:
+            def get_char(cli):
+                if '\xb7'.encode(cli.output.encoding(), 'replace') == b'?':
+                    return '.'
+                else:
+                    return '\xb7'
 
-        self.style = style
-        self.get_char = get_char or default_get_char
+        self.token = token
+        self.get_char = get_char
 
-    def apply_transformation(self, ti: TransformationInput) -> Transformation:
-        fragments = ti.fragments
 
-        if fragments and fragments[-1][1].endswith(" "):
-            t = (self.style, self.get_char())
-            fragments = explode_text_fragments(fragments)
+    def apply_transformation(self, cli, document, lineno, source_to_display, tokens):
+        if tokens and tokens[-1][1].endswith(' '):
+            t = (self.token, self.get_char(cli))
+            tokens = explode_tokens(tokens)
 
-            # Walk backwards through all te fragments and replace whitespace.
-            for i in range(len(fragments) - 1, -1, -1):
-                char = fragments[i][1]
-                if char == " ":
-                    fragments[i] = t
+            # Walk backwards through all te tokens and replace whitespace.
+            for i in range(len(tokens) - 1, -1, -1):
+                char = tokens[i][1]
+                if char == ' ':
+                    tokens[i] = t
                 else:
                     break
 
-        return Transformation(fragments)
+        return Transformation(tokens)
 
 
 class TabsProcessor(Processor):
@@ -689,70 +491,63 @@ class TabsProcessor(Processor):
     Render tabs as spaces (instead of ^I) or make them visible (for instance,
     by replacing them with dots.)
 
-    :param tabstop: Horizontal space taken by a tab. (`int` or callable that
-        returns an `int`).
-    :param char1: Character or callable that returns a character (text of
-        length one). This one is used for the first space taken by the tab.
-    :param char2: Like `char1`, but for the rest of the space.
+    :param tabstop: (Integer) Horizontal space taken by a tab.
+    :param get_char1: Callable that takes a `CommandLineInterface` and return a
+        character (text of length one). This one is used for the first space
+        taken by the tab.
+    :param get_char2: Like `get_char1`, but for the rest of the space.
     """
+    def __init__(self, tabstop=4, get_char1=None, get_char2=None, token=Token.Tab):
+        assert isinstance(tabstop, Integer)
+        assert get_char1 is None or callable(get_char1)
+        assert get_char2 is None or callable(get_char2)
 
-    def __init__(
-        self,
-        tabstop: Union[int, Callable[[], int]] = 4,
-        char1: Union[str, Callable[[], str]] = "|",
-        char2: Union[str, Callable[[], str]] = "\u2508",
-        style: str = "class:tab",
-    ) -> None:
-
-        self.char1 = char1
-        self.char2 = char2
+        self.get_char1 = get_char1 or get_char2 or (lambda cli: '|')
+        self.get_char2 = get_char2 or get_char1 or (lambda cli: '\u2508')
         self.tabstop = tabstop
-        self.style = style
+        self.token = token
 
-    def apply_transformation(self, ti: TransformationInput) -> Transformation:
-        tabstop = to_int(self.tabstop)
-        style = self.style
+    def apply_transformation(self, cli, document, lineno, source_to_display, tokens):
+        tabstop = int(self.tabstop)
+        token = self.token
 
         # Create separator for tabs.
-        separator1 = to_str(self.char1)
-        separator2 = to_str(self.char2)
+        separator1 = self.get_char1(cli)
+        separator2 = self.get_char2(cli)
 
-        # Transform fragments.
-        fragments = explode_text_fragments(ti.fragments)
+        # Transform tokens.
+        tokens = explode_tokens(tokens)
 
         position_mappings = {}
-        result_fragments: StyleAndTextTuples = []
+        result_tokens = []
         pos = 0
 
-        for i, fragment_and_text in enumerate(fragments):
+        for i, token_and_text in enumerate(tokens):
             position_mappings[i] = pos
 
-            if fragment_and_text[1] == "\t":
+            if token_and_text[1] == '\t':
                 # Calculate how many characters we have to insert.
                 count = tabstop - (pos % tabstop)
                 if count == 0:
                     count = tabstop
 
                 # Insert tab.
-                result_fragments.append((style, separator1))
-                result_fragments.append((style, separator2 * (count - 1)))
+                result_tokens.append((token, separator1))
+                result_tokens.append((token, separator2 * (count - 1)))
                 pos += count
             else:
-                result_fragments.append(fragment_and_text)
+                result_tokens.append(token_and_text)
                 pos += 1
 
-        position_mappings[len(fragments)] = pos
-        # Add `pos+1` to mapping, because the cursor can be right after the
-        # line as well.
-        position_mappings[len(fragments) + 1] = pos + 1
+        position_mappings[len(tokens)] = pos
 
-        def source_to_display(from_position: int) -> int:
-            "Maps original cursor position to the new one."
+        def source_to_display(from_position):
+            " Maps original cursor position to the new one. "
             return position_mappings[from_position]
 
-        def display_to_source(display_pos: int) -> int:
-            "Maps display cursor position to the original one."
-            position_mappings_reversed = {v: k for k, v in position_mappings.items()}
+        def display_to_source(display_pos):
+            " Maps display cursor position to the original one. "
+            position_mappings_reversed = dict((v, k) for k, v in position_mappings.items())
 
             while display_pos >= 0:
                 try:
@@ -762,149 +557,9 @@ class TabsProcessor(Processor):
             return 0
 
         return Transformation(
-            result_fragments,
+            result_tokens,
             source_to_display=source_to_display,
-            display_to_source=display_to_source,
-        )
-
-
-class ReverseSearchProcessor(Processor):
-    """
-    Process to display the "(reverse-i-search)`...`:..." stuff around
-    the search buffer.
-
-    Note: This processor is meant to be applied to the BufferControl that
-    contains the search buffer, it's not meant for the original input.
-    """
-
-    _excluded_input_processors: List[Type[Processor]] = [
-        HighlightSearchProcessor,
-        HighlightSelectionProcessor,
-        BeforeInput,
-        AfterInput,
-    ]
-
-    def _get_main_buffer(
-        self, buffer_control: "BufferControl"
-    ) -> Optional["BufferControl"]:
-        from prompt_toolkit.layout.controls import BufferControl
-
-        prev_control = get_app().layout.search_target_buffer_control
-        if (
-            isinstance(prev_control, BufferControl)
-            and prev_control.search_buffer_control == buffer_control
-        ):
-            return prev_control
-        return None
-
-    def _content(
-        self, main_control: "BufferControl", ti: TransformationInput
-    ) -> "UIContent":
-        from prompt_toolkit.layout.controls import BufferControl
-
-        # Emulate the BufferControl through which we are searching.
-        # For this we filter out some of the input processors.
-        excluded_processors = tuple(self._excluded_input_processors)
-
-        def filter_processor(item: Processor) -> Optional[Processor]:
-            """Filter processors from the main control that we want to disable
-            here. This returns either an accepted processor or None."""
-            # For a `_MergedProcessor`, check each individual processor, recursively.
-            if isinstance(item, _MergedProcessor):
-                accepted_processors = [filter_processor(p) for p in item.processors]
-                return merge_processors(
-                    [p for p in accepted_processors if p is not None]
-                )
-
-            # For a `ConditionalProcessor`, check the body.
-            elif isinstance(item, ConditionalProcessor):
-                p = filter_processor(item.processor)
-                if p:
-                    return ConditionalProcessor(p, item.filter)
-
-            # Otherwise, check the processor itself.
-            else:
-                if not isinstance(item, excluded_processors):
-                    return item
-
-            return None
-
-        filtered_processor = filter_processor(
-            merge_processors(main_control.input_processors or [])
-        )
-        highlight_processor = HighlightIncrementalSearchProcessor()
-
-        if filtered_processor:
-            new_processors = [filtered_processor, highlight_processor]
-        else:
-            new_processors = [highlight_processor]
-
-        from .controls import SearchBufferControl
-
-        assert isinstance(ti.buffer_control, SearchBufferControl)
-
-        buffer_control = BufferControl(
-            buffer=main_control.buffer,
-            input_processors=new_processors,
-            include_default_input_processors=False,
-            lexer=main_control.lexer,
-            preview_search=True,
-            search_buffer_control=ti.buffer_control,
-        )
-
-        return buffer_control.create_content(ti.width, ti.height, preview_search=True)
-
-    def apply_transformation(self, ti: TransformationInput) -> Transformation:
-        from .controls import SearchBufferControl
-
-        assert isinstance(
-            ti.buffer_control, SearchBufferControl
-        ), "`ReverseSearchProcessor` should be applied to a `SearchBufferControl` only."
-
-        source_to_display: Optional[SourceToDisplay]
-        display_to_source: Optional[DisplayToSource]
-
-        main_control = self._get_main_buffer(ti.buffer_control)
-
-        if ti.lineno == 0 and main_control:
-            content = self._content(main_control, ti)
-
-            # Get the line from the original document for this search.
-            line_fragments = content.get_line(content.cursor_position.y)
-
-            if main_control.search_state.direction == SearchDirection.FORWARD:
-                direction_text = "i-search"
-            else:
-                direction_text = "reverse-i-search"
-
-            fragments_before: StyleAndTextTuples = [
-                ("class:prompt.search", "("),
-                ("class:prompt.search", direction_text),
-                ("class:prompt.search", ")`"),
-            ]
-
-            fragments = (
-                fragments_before
-                + [
-                    ("class:prompt.search.text", fragment_list_to_text(ti.fragments)),
-                    ("", "': "),
-                ]
-                + line_fragments
-            )
-
-            shift_position = fragment_list_len(fragments_before)
-            source_to_display = lambda i: i + shift_position
-            display_to_source = lambda i: i - shift_position
-        else:
-            source_to_display = None
-            display_to_source = None
-            fragments = ti.fragments
-
-        return Transformation(
-            fragments,
-            source_to_display=source_to_display,
-            display_to_source=display_to_source,
-        )
+            display_to_source=display_to_source)
 
 
 class ConditionalProcessor(Processor):
@@ -914,116 +569,37 @@ class ConditionalProcessor(Processor):
 
         # Create a function that returns whether or not the processor should
         # currently be applied.
-        def highlight_enabled():
+        def highlight_enabled(cli):
             return true_or_false
 
-        # Wrapped it in a `ConditionalProcessor` for usage in a `BufferControl`.
+        # Wrapt it in a `ConditionalProcessor` for usage in a `BufferControl`.
         BufferControl(input_processors=[
             ConditionalProcessor(HighlightSearchProcessor(),
                                  Condition(highlight_enabled))])
 
     :param processor: :class:`.Processor` instance.
-    :param filter: :class:`~prompt_toolkit.filters.Filter` instance.
+    :param filter: :class:`~prompt_toolkit.filters.CLIFilter` instance.
     """
+    def __init__(self, processor, filter):
+        assert isinstance(processor, Processor)
 
-    def __init__(self, processor: Processor, filter: FilterOrBool) -> None:
         self.processor = processor
-        self.filter = to_filter(filter)
+        self.filter = to_cli_filter(filter)
 
-    def apply_transformation(
-        self, transformation_input: TransformationInput
-    ) -> Transformation:
+    def apply_transformation(self, cli, document, lineno, source_to_display, tokens):
         # Run processor when enabled.
-        if self.filter():
-            return self.processor.apply_transformation(transformation_input)
+        if self.filter(cli):
+            return self.processor.apply_transformation(
+                cli, document, lineno, source_to_display, tokens)
         else:
-            return Transformation(transformation_input.fragments)
+            return Transformation(tokens)
 
-    def __repr__(self) -> str:
-        return "{}(processor={!r}, filter={!r})".format(
-            self.__class__.__name__,
-            self.processor,
-            self.filter,
-        )
+    def has_focus(self, cli):
+        if self.filter(cli):
+            return self.processor.has_focus(cli)
+        else:
+            return False
 
-
-class DynamicProcessor(Processor):
-    """
-    Processor class that dynamically returns any Processor.
-
-    :param get_processor: Callable that returns a :class:`.Processor` instance.
-    """
-
-    def __init__(self, get_processor: Callable[[], Optional[Processor]]) -> None:
-        self.get_processor = get_processor
-
-    def apply_transformation(self, ti: TransformationInput) -> Transformation:
-        processor = self.get_processor() or DummyProcessor()
-        return processor.apply_transformation(ti)
-
-
-def merge_processors(processors: List[Processor]) -> Processor:
-    """
-    Merge multiple `Processor` objects into one.
-    """
-    if len(processors) == 0:
-        return DummyProcessor()
-
-    if len(processors) == 1:
-        return processors[0]  # Nothing to merge.
-
-    return _MergedProcessor(processors)
-
-
-class _MergedProcessor(Processor):
-    """
-    Processor that groups multiple other `Processor` objects, but exposes an
-    API as if it is one `Processor`.
-    """
-
-    def __init__(self, processors: List[Processor]):
-        self.processors = processors
-
-    def apply_transformation(self, ti: TransformationInput) -> Transformation:
-        source_to_display_functions = [ti.source_to_display]
-        display_to_source_functions = []
-        fragments = ti.fragments
-
-        def source_to_display(i: int) -> int:
-            """Translate x position from the buffer to the x position in the
-            processor fragments list."""
-            for f in source_to_display_functions:
-                i = f(i)
-            return i
-
-        for p in self.processors:
-            transformation = p.apply_transformation(
-                TransformationInput(
-                    ti.buffer_control,
-                    ti.document,
-                    ti.lineno,
-                    source_to_display,
-                    fragments,
-                    ti.width,
-                    ti.height,
-                )
-            )
-            fragments = transformation.fragments
-            display_to_source_functions.append(transformation.display_to_source)
-            source_to_display_functions.append(transformation.source_to_display)
-
-        def display_to_source(i: int) -> int:
-            for f in reversed(display_to_source_functions):
-                i = f(i)
-            return i
-
-        # In the case of a nested _MergedProcessor, each processor wants to
-        # receive a 'source_to_display' function (as part of the
-        # TransformationInput) that has everything in the chain before
-        # included, because it can be called as part of the
-        # `apply_transformation` function. However, this first
-        # `source_to_display` should not be part of the output that we are
-        # returning. (This is the most consistent with `display_to_source`.)
-        del source_to_display_functions[:1]
-
-        return Transformation(fragments, source_to_display, display_to_source)
+    def __repr__(self):
+        return '%s(processor=%r, filter=%r)' % (
+            self.__class__.__name__, self.processor, self.filter)

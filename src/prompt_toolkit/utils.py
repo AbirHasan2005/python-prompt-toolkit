@@ -1,49 +1,29 @@
+from __future__ import unicode_literals
+import inspect
 import os
 import signal
 import sys
 import threading
-from collections import deque
-from typing import (
-    Callable,
-    ContextManager,
-    Deque,
-    Dict,
-    Generator,
-    Generic,
-    List,
-    Optional,
-    TypeVar,
-    Union,
-)
+import weakref
 
 from wcwidth import wcwidth
-
-__all__ = [
-    "Event",
-    "DummyContext",
-    "get_cwidth",
-    "suspend_to_background_supported",
-    "is_conemu_ansi",
-    "is_windows",
-    "in_main_thread",
-    "get_bell_environment_variable",
-    "get_term_environment_variable",
-    "take_using_weights",
-    "to_str",
-    "to_int",
-    "AnyFloat",
-    "to_float",
-    "is_dumb_terminal",
-]
-
-# Used to ensure sphinx autodoc does not try to import platform-specific
-# stuff when documenting win32.py modules.
-SPHINX_AUTODOC_RUNNING = "sphinx.ext.autodoc" in sys.modules
-
-_Sender = TypeVar("_Sender", covariant=True)
+from six.moves import range
 
 
-class Event(Generic[_Sender]):
+__all__ = (
+    'Event',
+    'DummyContext',
+    'get_cwidth',
+    'suspend_to_background_supported',
+    'is_conemu_ansi',
+    'is_windows',
+    'in_main_thread',
+    'take_using_weights',
+    'test_callable_args',
+)
+
+
+class Event(object):
     """
     Simple event to which event handlers can be attached. For instance::
 
@@ -63,105 +43,121 @@ class Event(Generic[_Sender]):
         # Fire event.
         obj.event()
     """
-
-    def __init__(
-        self, sender: _Sender, handler: Optional[Callable[[_Sender], None]] = None
-    ) -> None:
+    def __init__(self, sender, handler=None):
         self.sender = sender
-        self._handlers: List[Callable[[_Sender], None]] = []
+        self._handlers = []
 
         if handler is not None:
             self += handler
 
-    def __call__(self) -> None:
-        "Fire event."
+    def __call__(self):
+        " Fire event. "
         for handler in self._handlers:
             handler(self.sender)
 
-    def fire(self) -> None:
-        "Alias for just calling the event."
+    def fire(self):
+        " Alias for just calling the event. "
         self()
 
-    def add_handler(self, handler: Callable[[_Sender], None]) -> None:
+    def __iadd__(self, handler):
         """
         Add another handler to this callback.
         (Handler should be a callable that takes exactly one parameter: the
         sender object.)
         """
+        # Test handler.
+        assert callable(handler)
+        if not test_callable_args(handler, [None]):
+            raise TypeError("%r doesn't take exactly one argument." % handler)
+
         # Add to list of event handlers.
         self._handlers.append(handler)
+        return self
 
-    def remove_handler(self, handler: Callable[[_Sender], None]) -> None:
+    def __isub__(self, handler):
         """
         Remove a handler from this callback.
         """
-        if handler in self._handlers:
-            self._handlers.remove(handler)
-
-    def __iadd__(self, handler: Callable[[_Sender], None]) -> "Event[_Sender]":
-        """
-        `event += handler` notation for adding a handler.
-        """
-        self.add_handler(handler)
-        return self
-
-    def __isub__(self, handler: Callable[[_Sender], None]) -> "Event[_Sender]":
-        """
-        `event -= handler` notation for removing a handler.
-        """
-        self.remove_handler(handler)
+        self._handlers.remove(handler)
         return self
 
 
-class DummyContext(ContextManager[None]):
+# Cache of signatures. Improves the performance of `test_callable_args`.
+_signatures_cache = weakref.WeakKeyDictionary()
+
+
+def test_callable_args(func, args):
+    """
+    Return True when this function can be called with the given arguments.
+    """
+    assert isinstance(args, (list, tuple))
+    signature = getattr(inspect, 'signature', None)
+
+    if signature is not None:
+        # For Python 3, use inspect.signature.
+        try:
+            sig = _signatures_cache[func]
+        except KeyError:
+            sig = signature(func)
+            _signatures_cache[func] = sig
+
+        try:
+            sig.bind(*args)
+        except TypeError:
+            return False
+        else:
+            return True
+    else:
+        # For older Python versions, fall back to using getargspec.
+        spec = inspect.getargspec(func)
+
+        # Drop the 'self'
+        def drop_self(spec):
+            args, varargs, varkw, defaults = spec
+            if args[0:1] == ['self']:
+                args = args[1:]
+            return inspect.ArgSpec(args, varargs, varkw, defaults)
+
+        spec = drop_self(spec)
+
+        # When taking *args, always return True.
+        if spec.varargs is not None:
+            return True
+
+        # Test whether the given amount of args is between the min and max
+        # accepted argument counts.
+        return len(spec.args) - len(spec.defaults or []) <= len(args) <= len(spec.args)
+
+
+class DummyContext(object):
     """
     (contextlib.nested is not available on Py3)
     """
-
-    def __enter__(self) -> None:
+    def __enter__(self):
         pass
 
-    def __exit__(self, *a: object) -> None:
+    def __exit__(self, *a):
         pass
 
 
-class _CharSizesCache(Dict[str, int]):
+class _CharSizesCache(dict):
     """
     Cache for wcwidth sizes.
     """
-
-    LONG_STRING_MIN_LEN = 64  # Minimum string length for considering it long.
-    MAX_LONG_STRINGS = 16  # Maximum number of long strings to remember.
-
-    def __init__(self) -> None:
-        super().__init__()
-        # Keep track of the "long" strings in this cache.
-        self._long_strings: Deque[str] = deque()
-
-    def __missing__(self, string: str) -> int:
+    def __missing__(self, string):
         # Note: We use the `max(0, ...` because some non printable control
         #       characters, like e.g. Ctrl-underscore get a -1 wcwidth value.
         #       It can be possible that these characters end up in the input
         #       text.
-        result: int
         if len(string) == 1:
             result = max(0, wcwidth(string))
         else:
-            result = sum(self[c] for c in string)
+            result = sum(max(0, wcwidth(c)) for c in string)
 
-        # Store in cache.
-        self[string] = result
-
-        # Rotate long strings.
+        # Cache for short strings.
         # (It's hard to tell what we can consider short...)
-        if len(string) > self.LONG_STRING_MIN_LEN:
-            long_strings = self._long_strings
-            long_strings.append(string)
-
-            if len(long_strings) > self.MAX_LONG_STRINGS:
-                key_to_remove = long_strings.popleft()
-                if key_to_remove in self:
-                    del self[key_to_remove]
+        if len(string) < 256:
+            self[string] = result
 
         return result
 
@@ -169,74 +165,43 @@ class _CharSizesCache(Dict[str, int]):
 _CHAR_SIZES_CACHE = _CharSizesCache()
 
 
-def get_cwidth(string: str) -> int:
+def get_cwidth(string):
     """
     Return width of a string. Wrapper around ``wcwidth``.
     """
     return _CHAR_SIZES_CACHE[string]
 
 
-def suspend_to_background_supported() -> bool:
+def suspend_to_background_supported():
     """
     Returns `True` when the Python implementation supports
     suspend-to-background. This is typically `False' on Windows systems.
     """
-    return hasattr(signal, "SIGTSTP")
+    return hasattr(signal, 'SIGTSTP')
 
 
-def is_windows() -> bool:
+def is_windows():
     """
     True when we are using Windows.
     """
-    return sys.platform == "win32"  # Not 'darwin' or 'linux2'
+    return sys.platform.startswith('win')  # E.g. 'win32', not 'darwin' or 'linux2'
 
 
-def is_windows_vt100_supported() -> bool:
-    """
-    True when we are using Windows, but VT100 escape sequences are supported.
-    """
-    if sys.platform == "win32":
-        # Import needs to be inline. Windows libraries are not always available.
-        from prompt_toolkit.output.windows10 import is_win_vt100_enabled
-
-        return is_win_vt100_enabled()
-
-    return False
-
-
-def is_conemu_ansi() -> bool:
+def is_conemu_ansi():
     """
     True when the ConEmu Windows console is used.
     """
-    return sys.platform == "win32" and os.environ.get("ConEmuANSI", "OFF") == "ON"
+    return is_windows() and os.environ.get('ConEmuANSI', 'OFF') == 'ON'
 
 
-def in_main_thread() -> bool:
+def in_main_thread():
     """
     True when the current thread is the main thread.
     """
-    return threading.current_thread().__class__.__name__ == "_MainThread"
+    return threading.current_thread().__class__.__name__ == '_MainThread'
 
 
-def get_bell_environment_variable() -> bool:
-    """
-    True if env variable is set to true (true, TRUE, TrUe, 1).
-    """
-    value = os.environ.get("PROMPT_TOOLKIT_BELL", "true")
-    return value.lower() in ("1", "true")
-
-
-def get_term_environment_variable() -> str:
-    "Return the $TERM environment variable."
-    return os.environ.get("TERM", "")
-
-
-_T = TypeVar("_T")
-
-
-def take_using_weights(
-    items: List[_T], weights: List[int]
-) -> Generator[_T, None, None]:
+def take_using_weights(items, weights):
     """
     Generator that keeps yielding items from the items list, in proportion to
     their weight. For instance::
@@ -249,25 +214,12 @@ def take_using_weights(
     :param weights: Integers representing the weight. (Numbers have to be
                     integers, not floats.)
     """
+    assert isinstance(items, list)
+    assert isinstance(weights, list)
+    assert all(isinstance(i, int) for i in weights)
     assert len(items) == len(weights)
     assert len(items) > 0
 
-    # Remove items with zero-weight.
-    items2 = []
-    weights2 = []
-    for item, w in zip(items, weights):
-        if w > 0:
-            items2.append(item)
-            weights2.append(w)
-
-    items = items2
-    weights = weights2
-
-    # Make sure that we have some items left.
-    if not items:
-        raise ValueError("Did't got any items with a positive weight.")
-
-    #
     already_taken = [0 for i in items]
     item_count = len(items)
     max_weight = max(weights)
@@ -286,43 +238,3 @@ def take_using_weights(
                     adding = True
 
         i += 1
-
-
-def to_str(value: Union[Callable[[], str], str]) -> str:
-    "Turn callable or string into string."
-    if callable(value):
-        return to_str(value())
-    else:
-        return str(value)
-
-
-def to_int(value: Union[Callable[[], int], int]) -> int:
-    "Turn callable or int into int."
-    if callable(value):
-        return to_int(value())
-    else:
-        return int(value)
-
-
-AnyFloat = Union[Callable[[], float], float]
-
-
-def to_float(value: AnyFloat) -> float:
-    "Turn callable or float into float."
-    if callable(value):
-        return to_float(value())
-    else:
-        return float(value)
-
-
-def is_dumb_terminal(term: Optional[str] = None) -> bool:
-    """
-    True if this terminal type is considered "dumb".
-
-    If so, we should fall back to the simplest possible form of line editing,
-    without cursor positioning and color support.
-    """
-    if term is None:
-        return is_dumb_terminal(os.environ.get("TERM", ""))
-
-    return term.lower() in ["dumb", "unknown"]

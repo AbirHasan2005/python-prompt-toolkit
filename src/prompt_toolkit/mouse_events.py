@@ -15,74 +15,34 @@ through the `Window` class where the coordinates are translated from absolute
 coordinates to coordinates relative to the user control, and there
 `UIControl.mouse_handler` is called.
 """
-from enum import Enum
-from typing import FrozenSet
+from __future__ import unicode_literals
 
-from .data_structures import Point
-
-__all__ = ["MouseEventType", "MouseButton", "MouseModifier", "MouseEvent"]
-
-
-class MouseEventType(Enum):
-    # Mouse up: This same event type is fired for all three events: left mouse
-    # up, right mouse up, or middle mouse up
-    MOUSE_UP = "MOUSE_UP"
-
-    # Mouse down: This implicitly refers to the left mouse down (this event is
-    # not fired upon pressing the middle or right mouse buttons).
-    MOUSE_DOWN = "MOUSE_DOWN"
-
-    SCROLL_UP = "SCROLL_UP"
-    SCROLL_DOWN = "SCROLL_DOWN"
-
-    # Triggered when the left mouse button is held down, and the mouse moves
-    MOUSE_MOVE = "MOUSE_MOVE"
+__all__ = (
+    'MouseEventType',
+    'MouseEvent'
+)
 
 
-class MouseButton(Enum):
-    LEFT = "LEFT"
-    MIDDLE = "MIDDLE"
-    RIGHT = "RIGHT"
-
-    # When we're scrolling, or just moving the mouse and not pressing a button.
-    NONE = "NONE"
-
-    # This is for when we don't know which mouse button was pressed, but we do
-    # know that one has been pressed during this mouse event (as opposed to
-    # scrolling, for example)
-    UNKNOWN = "UNKNOWN"
+class MouseEventType:
+    MOUSE_UP = 'MOUSE_UP'
+    MOUSE_DOWN = 'MOUSE_DOWN'
+    SCROLL_UP = 'SCROLL_UP'
+    SCROLL_DOWN = 'SCROLL_DOWN'
 
 
-class MouseModifier(Enum):
-    SHIFT = "SHIFT"
-    ALT = "ALT"
-    CONTROL = "CONTROL"
+MouseEventTypes = MouseEventType  # Deprecated: plural for backwards compatibility.
 
 
-class MouseEvent:
+class MouseEvent(object):
     """
     Mouse event, sent to `UIControl.mouse_handler`.
 
     :param position: `Point` instance.
     :param event_type: `MouseEventType`.
     """
-
-    def __init__(
-        self,
-        position: Point,
-        event_type: MouseEventType,
-        button: MouseButton,
-        modifiers: FrozenSet[MouseModifier],
-    ) -> None:
+    def __init__(self, position, event_type):
         self.position = position
         self.event_type = event_type
-        self.button = button
-        self.modifiers = modifiers
 
-    def __repr__(self) -> str:
-        return "MouseEvent({!r},{!r},{!r},{!r})".format(
-            self.position,
-            self.event_type,
-            self.button,
-            self.modifiers,
-        )
+    def __repr__(self):
+        return 'MouseEvent(%r, %r)' % (self.position, self.event_type)

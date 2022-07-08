@@ -1,16 +1,16 @@
 """
-Validator for a regular language.
+Validator for a regular langage.
 """
-from typing import Dict
+from __future__ import unicode_literals
 
+from prompt_toolkit.validation import Validator, ValidationError
 from prompt_toolkit.document import Document
-from prompt_toolkit.validation import ValidationError, Validator
 
 from .compiler import _CompiledGrammar
 
-__all__ = [
-    "GrammarValidator",
-]
+__all__ = (
+    'GrammarValidator',
+)
 
 
 class GrammarValidator(Validator):
@@ -22,15 +22,14 @@ class GrammarValidator(Validator):
     :param validators: `dict` mapping variable names of the grammar to the
                        `Validator` instances to be used for each variable.
     """
-
-    def __init__(
-        self, compiled_grammar: _CompiledGrammar, validators: Dict[str, Validator]
-    ) -> None:
+    def __init__(self, compiled_grammar, validators):
+        assert isinstance(compiled_grammar, _CompiledGrammar)
+        assert isinstance(validators, dict)
 
         self.compiled_grammar = compiled_grammar
         self.validators = validators
 
-    def validate(self, document: Document) -> None:
+    def validate(self, document):
         # Parse input document.
         # We use `match`, not `match_prefix`, because for validation, we want
         # the actual, unambiguous interpretation of the input.
@@ -52,9 +51,7 @@ class GrammarValidator(Validator):
                     except ValidationError as e:
                         raise ValidationError(
                             cursor_position=v.start + e.cursor_position,
-                            message=e.message,
-                        ) from e
+                            message=e.message)
         else:
-            raise ValidationError(
-                cursor_position=len(document.text), message="Invalid command"
-            )
+            raise ValidationError(cursor_position=len(document.text),
+                                  message='Invalid command')

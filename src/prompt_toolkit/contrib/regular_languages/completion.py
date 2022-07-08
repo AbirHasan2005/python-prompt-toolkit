@@ -1,16 +1,16 @@
 """
 Completer for a regular grammar.
 """
-from typing import Dict, Iterable, List
+from __future__ import unicode_literals
 
-from prompt_toolkit.completion import CompleteEvent, Completer, Completion
+from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.document import Document
 
-from .compiler import Match, _CompiledGrammar
+from .compiler import _CompiledGrammar
 
-__all__ = [
-    "GrammarCompleter",
-]
+__all__ = (
+    'GrammarCompleter',
+)
 
 
 class GrammarCompleter(Completer):
@@ -22,29 +22,24 @@ class GrammarCompleter(Completer):
     :param completers: `dict` mapping variable names of the grammar to the
                        `Completer` instances to be used for each variable.
     """
-
-    def __init__(
-        self, compiled_grammar: _CompiledGrammar, completers: Dict[str, Completer]
-    ) -> None:
+    def __init__(self, compiled_grammar, completers):
+        assert isinstance(compiled_grammar, _CompiledGrammar)
+        assert isinstance(completers, dict)
 
         self.compiled_grammar = compiled_grammar
         self.completers = completers
 
-    def get_completions(
-        self, document: Document, complete_event: CompleteEvent
-    ) -> Iterable[Completion]:
+    def get_completions(self, document, complete_event):
         m = self.compiled_grammar.match_prefix(document.text_before_cursor)
 
         if m:
             completions = self._remove_duplicates(
-                self._get_completions_for_match(m, complete_event)
-            )
+                self._get_completions_for_match(m, complete_event))
 
-            yield from completions
+            for c in completions:
+                yield c
 
-    def _get_completions_for_match(
-        self, match: Match, complete_event: CompleteEvent
-    ) -> Iterable[Completion]:
+    def _get_completions_for_match(self, match, complete_event):
         """
         Yield all the possible completions for this input string.
         (The completer assumes that the cursor position was at the end of the
@@ -67,26 +62,22 @@ class GrammarCompleter(Completer):
 
                 # Call completer
                 for completion in completer.get_completions(document, complete_event):
-                    new_text = (
-                        unwrapped_text[: len(text) + completion.start_position]
-                        + completion.text
-                    )
+                    new_text = unwrapped_text[:len(text) + completion.start_position] + completion.text
 
                     # Wrap again.
                     yield Completion(
                         text=self.compiled_grammar.escape(varname, new_text),
                         start_position=start - len(match.string),
                         display=completion.display,
-                        display_meta=completion.display_meta,
-                    )
+                        display_meta=completion.display_meta)
 
-    def _remove_duplicates(self, items: Iterable[Completion]) -> List[Completion]:
+    def _remove_duplicates(self, items):
         """
         Remove duplicates, while keeping the order.
         (Sometimes we have duplicates, because the there several matches of the
         same grammar, each yielding similar completions.)
         """
-        result: List[Completion] = []
+        result = []
         for i in items:
             if i not in result:
                 result.append(i)
